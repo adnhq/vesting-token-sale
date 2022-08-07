@@ -6,10 +6,13 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract TokenSale is Ownable {
-    uint256 public constant CLIFF_PERIOD = 365 days;
-    uint256 public constant VESTING_PERIOD = 365 days;
     uint256 public purchaseLimit;
     uint256 public rate;
+
+    uint64 public constant CLIFF_PERIOD = 365 days;
+    uint64 public constant VESTING_PERIOD = 365 days;
+    uint64 public saleStartTime; // Remove if not relevant
+    uint64 public saleEndTime; // Remove if not relevant
 
     address private _vault;
     bool public presale = true; 
@@ -28,13 +31,26 @@ contract TokenSale is Ownable {
         _;
     }
 
+    modifier onSale() {
+        require(saleStartTime > block.timestamp && block.timestamp < saleEndTime, "SALE_INACTIVE");
+        _;
+    }
+
     /**
      * @param _token address of token contract
      * @param vault_ address to send usdc received from sales
      * @param _rate conversion rate from usdc to sale token
      */
-    constructor(address _token, address vault_, uint256 _rate, uint256 vestingPeriod) {
-        if(_token == address(0) || vault_ == address(0) || _rate == 0)
+    constructor(
+        address _token, 
+        address vault_, 
+        uint256 _rate, 
+        uint256 vestingPeriod,
+        uint256 _saleStartTime,
+        uint256 _saleEndTime
+    ) {
+        if(_token == address(0) || vault_ == address(0) || _rate == 0 ||
+         _saleStartTime < block.timestamp || _saleStartTime > _saleEndTime)
             revert("INVALID_ARGS");
 
         _vault = vault_;
@@ -46,7 +62,7 @@ contract TokenSale is Ownable {
      * @notice Purchase tokens and deploys a vesting contract
      * @param amount the amount of tokens to be purchased
      */
-    function purchase(uint256 amount) external notPaused {
+    function purchase(uint256 amount) external onSale notPaused {
         require(amount > 0 && contractBalance() > amount , "INVALID_AMOUNT");
         address recipient = _msgSender();
         
