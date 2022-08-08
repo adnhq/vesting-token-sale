@@ -50,6 +50,8 @@ contract TokenSale is Ownable {
      * @param _token address of token contract
      * @param vault_ address to send usdc received from sales
      * @param _rate conversion rate from usdc to sale token
+     * @param _saleStartTime sale start unix timestamp in seconds
+     * @param _saleEndTime sale end unix timestamp in seconds
      */
     constructor(
         address _token, 
