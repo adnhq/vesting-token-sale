@@ -5,21 +5,22 @@ pragma solidity =0.8.7;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract TokenSale is Ownable {
+contract VestingTokenSale is Ownable {
     uint public constant CLIFF_PERIOD = 365 days;
     uint public constant VESTING_PERIOD = 365 days;
 
-    uint public purchaseLimit;
     uint public totalPurchased;
-    uint public rate;
+    uint public rate; // How many token units a buyer gets for one unit of usdc - excluding decimals.
+    // Rate should be calculated using only 1 unit of usdc - like wei, NOT a whole usdc token (1 * 10**6)
     uint public saleStartTime;
     uint public saleEndTime;
 
-    address private _vault;
+    address private _vault; // Address which will receive the usdc from purchases
     bool public presale = true; 
     bool public paused = false;
     
     IERC20 private constant USDC = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48); // Ethereum mainnet address
+    // Replace usdc address if used on a different blockchain
     IERC20 public token; // Token to be sold
     
     struct Allocation {
@@ -29,11 +30,12 @@ contract TokenSale is Ownable {
     }
 
     mapping(address => uint) private _pBalance;
+    mapping(address => uint) private _pLimit;
     mapping(address => bool) private _whitelist;
     mapping(address => Allocation[]) private _allocations;
 
-    event TokensPurchased(address _holder, uint _amount);
-    event TokensReleased(address _recipient, uint _amount);
+    event TokensPurchased(address holder, uint amount);
+    event TokenReleased(address recipient, uint amount);
 
     
     modifier notPaused() {
@@ -46,10 +48,16 @@ contract TokenSale is Ownable {
         _;
     }
     
+    modifier holderOnly() {
+        require(_pBalance[msg.sender] > 0, "NOT_HOLDER");
+        require(_allocations[msg.sender].length > 0, "CLAIMED_FULL");
+        _;
+    }
+
     /**
      * @param _token address of token contract
      * @param vault_ address to send usdc received from sales
-     * @param _rate conversion rate from usdc to sale token
+     * @param _rate token units a buyer gets for one unit of usdc excluding decimals
      * @param _saleStartTime sale start unix timestamp in seconds
      * @param _saleEndTime sale end unix timestamp in seconds
      */
@@ -68,6 +76,7 @@ contract TokenSale is Ownable {
         rate = _rate;
         saleStartTime = _saleStartTime;
         saleEndTime = _saleEndTime;
+
         token = IERC20(_token);
     }
     
@@ -77,34 +86,32 @@ contract TokenSale is Ownable {
      */
     function purchase(uint _amount) external onSale notPaused {
         require(_amount > 0 && remainingTokens() > _amount , "INVALID_AMOUNT");
-        address recipient = _msgSender();
-        
         if(presale)
-            require(_whitelist[recipient], "NOT_WHITELISTED");
+            require(_whitelist[msg.sender], "NOT_WHITELISTED");
 
-        _pBalance[recipient] += _amount;
+        _pBalance[msg.sender] += _amount;
 
-        totalPurchased += _amount;
-
-        require(purchaseLimit > _pBalance[recipient], "EXCEEDING_PURCHASE_LIMIT");
-
-        USDC.transferFrom(recipient, _vault, _amount / rate);
+        if(_pLimit[msg.sender] != 0)
+            require(_pLimit[msg.sender] > _pBalance[msg.sender], "EXCEEDS_PURCHASE_LIMIT");
         
-        _allocations[recipient].push(Allocation({
+        totalPurchased += _amount;
+        _allocations[msg.sender].push(Allocation({
             vestingStart: block.timestamp + CLIFF_PERIOD,
             amount: _amount,
             released: 0
         }));
 
-        emit TokensPurchased(recipient, _amount);
+        USDC.transferFrom(msg.sender, _vault, _amount / rate);
+        
+        emit TokensPurchased(msg.sender, _amount);
 
     }
 
     /**
-     * @dev Removes first allocation of caller
+     * @dev Removes first allocation of caller.
      */
-    function _removeFront() internal {
-        Allocation[] storage allocations = _allocations[_msgSender()];
+    function _popFirst() private {
+        Allocation[] storage allocations = _allocations[msg.sender];
         
         if (allocations.length == 0) return;
 
@@ -119,29 +126,28 @@ contract TokenSale is Ownable {
     /**
      * @notice Claim tokens that have already vested.
      */
-    function claim() external {
-        address claimant = _msgSender();
-        require(_pBalance[claimant] > 0, "NOT_HOLDER");
-        Allocation storage allocation = _allocations[claimant][0];
+    function claim() external holderOnly {
+        Allocation storage allocation = _allocations[msg.sender][0];
         uint releasable = vestedAmount(block.timestamp) - allocation.released;
         if(releasable == 0) revert("NO_TOKENS_TO_CLAIM");
 
         allocation.released += releasable;
         allocation.amount -= releasable;
-
-        if(allocation.amount == 0)
-            _removeFront();
-
-        token.transfer(claimant, releasable);
         
-        emit TokensReleased(claimant, releasable);
+        // Remove first allocation if fully distributed
+        if(allocation.amount == 0)
+            _popFirst();
+
+        token.transfer(msg.sender, releasable);
+
+        emit TokenReleased(msg.sender, releasable);
     }
 
     /**
      * @dev Calculates the amount of tokens that has already vested. Default implementation is a linear vesting curve.
      */
     function vestedAmount(uint timestamp) public view virtual returns (uint) {
-        return _vestingSchedule(_allocations[_msgSender()][0].amount + _allocations[_msgSender()][0].released, timestamp);
+        return _vestingSchedule(_allocations[msg.sender][0].amount + _allocations[msg.sender][0].released, timestamp);
     }
 
     /**
@@ -149,7 +155,7 @@ contract TokenSale is Ownable {
      * an asset given its total historical allocation.
      */
     function _vestingSchedule(uint totalAllocation, uint timestamp) internal view virtual returns (uint) {
-        uint vStart = _allocations[_msgSender()][0].vestingStart;
+        uint vStart = _allocations[msg.sender][0].vestingStart;
 
         if (timestamp < vStart) {
             return 0;
@@ -168,7 +174,7 @@ contract TokenSale is Ownable {
     }
 
     /**
-     * @notice Returns usdc required to purchase input amount of tokens
+     * @notice Returns amount of usdc required to purchase input amount of tokens
      * @param amount amount of tokens to purchase
      */
     function getCost(uint amount) public view returns (uint) {
@@ -183,7 +189,7 @@ contract TokenSale is Ownable {
     }
 
     /**
-     * @notice Check if an address is whitelisted
+     * @notice Returns if an address is whitelisted
      * @param user address to verify
      */
     function whitelisted(address user) external view returns (bool) {
@@ -193,16 +199,20 @@ contract TokenSale is Ownable {
     /* ||___ONLY-OWNER___|| */
     
     /**
-     * @notice Include users into whitelist
+     * @notice Include users into whitelist along with their purchase limits
      * @param users list of addresses to whitelist
+     * @param limits list of limits corresponding to each whitelisted user
+     * NOTE: Length of both input lists must be equal. Pass 0 as limit if limit should not be imposed on a specific address
      */
     function whitelist(
-        address[] 
-        calldata 
-        users) 
-    external onlyOwner {
-        for(uint i = 0; i < users.length; i++)
+        address[] calldata users,
+        uint[] limits
+    ) external onlyOwner {
+        require(users.length == limits.length, "UNEQUAL_LISTS");
+        for(uint i = 0; i < users.length; i++) {
             _whitelist[users[i]] = true;
+            _pLimit[users[i]] = limits[i];
+        }
     }
 
     /**
@@ -212,12 +222,21 @@ contract TokenSale is Ownable {
     function whitelistExclude(
         address[] 
         calldata 
-        users) 
-    external onlyOwner {
+        users
+    ) external onlyOwner {
         for(uint i = 0; i < users.length; i++)
             _whitelist[users[i]] = false;
     }
     
+    /**
+     * @notice Set purchase limit for a specific user
+     * @param user address of the user to put limit on
+     * @param limit maximum amount of tokens the user can buy
+     */
+    function setPurchaseLimit(address user, uint limit) external onlyOwner {
+        _pLimit[user] = limit;
+    }
+
     /**
      * @notice Change vault address
      * @param newVault address of new vault
@@ -225,14 +244,6 @@ contract TokenSale is Ownable {
     function setVault(address newVault) external onlyOwner {
         require(newVault != address(0), "NON_ZERO_REQ");
         _vault = newVault;
-    }
-
-    /**
-     * @notice Change purchase limit
-     * @param newPurchaseLimit new maximum amount of tokens a user can purchase
-     */
-    function setPurchaseLimit(uint newPurchaseLimit) external onlyOwner {
-        purchaseLimit = newPurchaseLimit;
     }
 
     /**
@@ -277,7 +288,7 @@ contract TokenSale is Ownable {
     }
 
     /**
-     * @notice Transfers unpledged tokens to contract owner
+     * @notice Transfers unsold tokens to contract owner
      */
     function withdrawTokens() external onlyOwner {
         token.transfer(msg.sender, remainingTokens());
