@@ -33,6 +33,7 @@ contract TokenSale is Ownable {
     mapping(address => Allocation[]) private _allocations;
 
     event TokensPurchased(address _holder, uint _amount);
+    event TokensReleased(address _recipient, uint _amount);
 
     
     modifier notPaused() {
@@ -130,6 +131,8 @@ contract TokenSale is Ownable {
             _removeFront();
 
         token.transfer(claimant, releasable);
+        
+        emit TokensReleased(claimant, releasable);
     }
 
     /**
