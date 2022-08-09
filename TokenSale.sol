@@ -9,7 +9,7 @@ contract VestingTokenSale is Ownable {
     uint public constant CLIFF_PERIOD = 365 days;
     uint public constant VESTING_PERIOD = 365 days;
 
-    uint public totalPurchased;
+    uint public totalSold;
     uint public rate; // How many token units a buyer gets for one unit of usdc - excluding decimals.
     // Rate should be calculated using only 1 unit of usdc - like wei, NOT a whole usdc token (1 * 10**6)
     uint public saleStartTime;
@@ -30,6 +30,7 @@ contract VestingTokenSale is Ownable {
     }
 
     mapping(address => uint) private _pBalance;
+    mapping(address => uint) private _rBalance;
     mapping(address => uint) private _pLimit;
     mapping(address => bool) private _whitelist;
     mapping(address => Allocation[]) private _allocations;
@@ -81,29 +82,30 @@ contract VestingTokenSale is Ownable {
     }
     
     /**
-     * @notice Purchase tokens and deploys a vesting contract
-     * @param _amount the amount of tokens to be purchased
+     * @notice Purchase tokens
+     * @param allowance the amount of usdc tokens to spend
      */
-    function purchase(uint _amount) external onSale notPaused {
-        require(_amount > 0 && remainingTokens() > _amount , "INVALID_AMOUNT");
+    function purchase(uint allowance) external onSale notPaused {
+        uint tokenAmt = getTokenAmount(allowance);
+        require(allowance > 0 && remainingTokens() >= tokenAmt, "INVALID_AMOUNT");
         if(presale)
             require(_whitelist[msg.sender], "NOT_WHITELISTED");
 
-        _pBalance[msg.sender] += _amount;
+        _pBalance[msg.sender] += tokenAmt;
 
         if(_pLimit[msg.sender] != 0)
             require(_pLimit[msg.sender] > _pBalance[msg.sender], "EXCEEDS_PURCHASE_LIMIT");
         
-        totalPurchased += _amount;
+        totalSold += tokenAmt;
         _allocations[msg.sender].push(Allocation({
             vestingStart: block.timestamp + CLIFF_PERIOD,
-            amount: _amount,
+            amount: tokenAmt,
             released: 0
         }));
 
-        USDC.transferFrom(msg.sender, _vault, _amount / rate);
+        USDC.transferFrom(msg.sender, _vault, allowance);
         
-        emit TokensPurchased(msg.sender, _amount);
+        emit TokensPurchased(msg.sender, tokenAmt);
 
     }
 
@@ -124,30 +126,47 @@ contract VestingTokenSale is Ownable {
     }
 
     /**
-     * @notice Claim tokens that have already vested.
+     * @notice Release tokens that have already vested.
      */
-    function claim() external holderOnly {
-        Allocation storage allocation = _allocations[msg.sender][0];
-        uint releasable = vestedAmount(block.timestamp) - allocation.released;
-        if(releasable == 0) revert("NO_TOKENS_TO_CLAIM");
+    function release() external holderOnly {
+        uint releasedAmt = _release();
+        token.transfer(msg.sender, releasedAmt);
 
-        allocation.released += releasable;
-        allocation.amount -= releasable;
-        
-        // Remove first allocation if fully distributed
-        if(allocation.amount == 0)
-            _popFirst();
+        emit TokenReleased(msg.sender, releasedAmt);
 
-        token.transfer(msg.sender, releasable);
+    }
 
-        emit TokenReleased(msg.sender, releasable);
+    function _release() internal returns (uint) {
+        uint rTotal;
+
+        for(uint i = 0; i < _allocations[msg.sender].length; i++) {
+            uint releasable = vestedAmount() - _allocations[msg.sender][0].released;
+            if(releasable == 0) 
+                break;
+            
+            rTotal += releasable;
+            _allocations[msg.sender][0].released += releasable;
+            _allocations[msg.sender][0].amount -= releasable;
+            
+            // Remove first allocation if fully distributed
+            if(_allocations[msg.sender][0].amount == 0)
+                _popFirst();
+        }
+        return rTotal;
+    }
+
+    /**
+     * @notice Returns amount of tokens already released to the user
+     */
+    function releasedAmount(address holder) external view returns (uint) {
+        return _rBalance[holder];
     }
 
     /**
      * @dev Calculates the amount of tokens that has already vested. Default implementation is a linear vesting curve.
      */
-    function vestedAmount(uint timestamp) public view virtual returns (uint) {
-        return _vestingSchedule(_allocations[msg.sender][0].amount + _allocations[msg.sender][0].released, timestamp);
+    function vestedAmount() public view virtual returns (uint) {
+        return _vestingSchedule(_allocations[msg.sender][0].amount + _allocations[msg.sender][0].released, block.timestamp);
     }
 
     /**
@@ -170,17 +189,25 @@ contract VestingTokenSale is Ownable {
      * @notice Returns amount of tokens available for sale
      */
     function remainingTokens() public view returns (uint) {
-        return token.balanceOf(address(this)) - totalPurchased;
+        return token.balanceOf(address(this)) - totalSold;
     }
 
     /**
-     * @notice Returns amount of usdc required to purchase input amount of tokens
-     * @param amount amount of tokens to purchase
+     * @notice Returns amount of tokens that can be bought for input amount of usdc
+     * @param allowance amount of usdc to be used for purchase
      */
-    function getCost(uint amount) public view returns (uint) {
-        return amount / rate;
+    function getTokenAmount(uint allowance) public view returns (uint) {
+        return allowance * rate;
     }
 
+    /**
+     * @notice Returns total amount of tokens purchased by the user
+     * @param user address to retrieve purchase balance of
+     */
+    function getPurchasedAmount(address user) external view returns (uint) {
+        return _pBalance[user];
+    }
+    
     /**
      * @notice Returns if sale is currently ongoing
      */
@@ -189,7 +216,7 @@ contract VestingTokenSale is Ownable {
     }
 
     /**
-     * @notice Returns if an address is whitelisted
+     * @notice Check if an address is whitelisted
      * @param user address to verify
      */
     function whitelisted(address user) external view returns (bool) {
@@ -206,7 +233,7 @@ contract VestingTokenSale is Ownable {
      */
     function whitelist(
         address[] calldata users,
-        uint[] limits
+        uint[] calldata limits
     ) external onlyOwner {
         require(users.length == limits.length, "UNEQUAL_LISTS");
         for(uint i = 0; i < users.length; i++) {
