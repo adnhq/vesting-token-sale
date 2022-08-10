@@ -27,6 +27,7 @@ contract VestingTokenSale is Ownable {
         uint vestingStart;
         uint amount;
         uint released;
+        bool allReleased;
     }
 
     mapping(address => uint) private _pBalance;
@@ -100,7 +101,8 @@ contract VestingTokenSale is Ownable {
         _allocations[msg.sender].push(Allocation({
             vestingStart: block.timestamp + CLIFF_PERIOD,
             amount: tokenAmt,
-            released: 0
+            released: 0,
+            allReleased: false
         }));
 
         USDC.transferFrom(msg.sender, _vault, allowance);
@@ -110,48 +112,60 @@ contract VestingTokenSale is Ownable {
     }
 
     /**
-     * @dev Removes first allocation of caller.
-     */
-    function _popFirst() private {
-        Allocation[] storage allocations = _allocations[msg.sender];
-        
-        if (allocations.length == 0) return;
-
-        for (uint i = 0; i < allocations.length-1; i++){
-            allocations[i] = allocations[i+1];
-        }
-
-        delete allocations[allocations.length-1];
-        allocations.pop();
-    }
-
-    /**
      * @notice Release tokens that have already vested.
      */
     function release() external holderOnly {
-        uint releasedAmt = _release();
-        token.transfer(msg.sender, releasedAmt);
+        require(_allocations[msg.sender].length > 0, "NO_ALLOC");
 
-        emit TokenReleased(msg.sender, releasedAmt);
-
-    }
-
-    function _release() internal returns (uint) {
         uint rTotal;
 
         for(uint i = 0; i < _allocations[msg.sender].length; i++) {
-            uint releasable = vestedAmount() - _allocations[msg.sender][0].released;
+            Allocation storage allocation = _allocations[msg.sender][i];
+
+            if(allocation.allReleased) 
+                continue;
+
+            uint releasable = _vestedAmount(i) - allocation.released;
+
             if(releasable == 0) 
                 break;
             
             rTotal += releasable;
-            _allocations[msg.sender][0].released += releasable;
-            _allocations[msg.sender][0].amount -= releasable;
+
+            allocation.released += releasable;
+            allocation.amount -= releasable;
             
-            // Remove first allocation if fully distributed
-            if(_allocations[msg.sender][0].amount == 0)
-                _popFirst();
+            if(allocation.amount == 0)
+                allocation.allReleased = true;
         }
+        
+        if(rTotal == 0)
+            revert("NO_TOKENS_VESTED");
+
+        _rBalance[msg.sender] += rTotal;
+
+        token.transfer(msg.sender, rTotal);
+
+        emit TokenReleased(msg.sender, rTotal);
+
+    }
+
+    function getVestedAmount() external view returns (uint) {
+        if(_allocations[msg.sender].length == 0) return 0;
+        
+        uint rTotal;
+
+        for(uint i = 0; i < _allocations[msg.sender].length; i++) {
+            if(_allocations[msg.sender][i].allReleased) continue;
+
+            uint releasable = _vestedAmount(i) - _allocations[msg.sender][i].released;
+
+            if(releasable == 0) 
+                break;
+            
+            rTotal += releasable;
+        }
+
         return rTotal;
     }
 
@@ -165,24 +179,24 @@ contract VestingTokenSale is Ownable {
     /**
      * @dev Calculates the amount of tokens that has already vested. Default implementation is a linear vesting curve.
      */
-    function vestedAmount() public view virtual returns (uint) {
-        return _vestingSchedule(_allocations[msg.sender][0].amount + _allocations[msg.sender][0].released, block.timestamp);
+    function _vestedAmount(uint index) internal view virtual returns (uint) {
+        return _vestingSchedule(_allocations[msg.sender][index].amount + _allocations[msg.sender][index].released, index);
     }
 
     /**
      * @dev Virtual implementation of the vesting formula. This returns the amount vested, as a function of time, for
      * an asset given its total historical allocation.
      */
-    function _vestingSchedule(uint totalAllocation, uint timestamp) internal view virtual returns (uint) {
-        uint vStart = _allocations[msg.sender][0].vestingStart;
-
-        if (timestamp < vStart) {
+    function _vestingSchedule(uint totalAllocation, uint index) internal view virtual returns (uint) {
+        uint vStart = _allocations[msg.sender][index].vestingStart;
+        uint timestamp = block.timestamp;
+    
+        if (timestamp < vStart) 
             return 0;
-        } else if (timestamp > vStart + VESTING_PERIOD) {
-            return totalAllocation;
-        } else {
-            return (totalAllocation * (timestamp - vStart)) / VESTING_PERIOD;
-        }
+
+        return timestamp > vStart + VESTING_PERIOD 
+        ? totalAllocation 
+        : (totalAllocation * (timestamp - vStart)) / VESTING_PERIOD;
     }
 
     /**
@@ -212,7 +226,7 @@ contract VestingTokenSale is Ownable {
      * @notice Returns if sale is currently ongoing
      */
     function saleActive() public view returns (bool) {
-        return saleStartTime > block.timestamp && block.timestamp < saleEndTime;
+        return saleStartTime < block.timestamp && block.timestamp < saleEndTime;
     }
 
     /**
