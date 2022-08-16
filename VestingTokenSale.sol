@@ -10,8 +10,7 @@ contract VestingTokenSale is Ownable {
     uint public constant VESTING_PERIOD = 365 days;
 
     uint public totalSold;
-    uint public rate; // How many token units a buyer gets for one unit of usdc - excluding decimals.
-    // Rate should be calculated using only 1 unit of usdc - like wei, NOT a whole usdc token (1 * 10**6)
+    uint public rate; // How many token units a buyer gets for one unit of usdc
     uint public saleStartTime;
     uint public saleEndTime;
 
